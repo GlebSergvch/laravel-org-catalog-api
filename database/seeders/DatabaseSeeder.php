@@ -135,19 +135,40 @@ class DatabaseSeeder extends Seeder
             }
             $org->buildings()->attach($attachBuildings);
 
-            // Активности
             $actCount = rand(1, 4);
-            $selectedActNames = collect($activityMap)->random($actCount)->keys();
+            $actIds = array_values($activityMap); // просто массив id
+            $actIdsCount = count($actIds);
+
             $attachActivities = [];
-            foreach ($selectedActNames as $actName) {
-                $actId = $activityMap[$actName] ?? null;
-                if ($actId) {
-                    $attachActivities[$actId] = ['created_by' => $admin->id, 'updated_by' => $admin->id];
+
+            if ($actIdsCount > 0) {
+                $countToPick = min($actCount, $actIdsCount);
+
+                if ($countToPick === 1) {
+                    $randomIndex = array_rand($actIds);
+                    $selectedIds = [$actIds[$randomIndex]];
+                } else {
+                    $randomKeys = (array) array_rand($actIds, $countToPick); // индексы
+                    $selectedIds = [];
+                    foreach ($randomKeys as $k) {
+                        $selectedIds[] = $actIds[$k];
+                    }
+                }
+
+                foreach ($selectedIds as $actId) {
+                    $attachActivities[(int)$actId] = [
+                        'created_by' => $admin->id,
+                        'updated_by' => $admin->id,
+                    ];
                 }
             }
-            $org->activities()->attach($attachActivities);
 
-            // Телефоны: 1–3 на организацию
+// прикрепляем (рекомендуется, чтобы не ломать при повторном сидировании)
+            if (!empty($attachActivities)) {
+                $org->activities()->syncWithoutDetaching($attachActivities);
+            }
+
+            // Телефоны
             $phoneCount = rand(1, 3);
             $usedPhones = [];
             for ($i = 0; $i < $phoneCount; $i++) {
