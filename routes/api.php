@@ -1,7 +1,8 @@
 <?php
 
-use App\Http\Api\V1\Building\IndexBuildingController;
-use App\Http\Api\V1\Building\ShowBuildingController;
+use App\Http\Api\V1\Activity\IndexActivityController;
+use App\Http\Api\V1\Organization\OrganizationListController;
+use App\Http\Api\V1\Organization\OrganizationShowController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -24,10 +25,9 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
 Route::prefix('v1')->middleware('api_key')->group(function () {
 
     // Здания
-    Route::get('/buildings', IndexBuildingController::class);
-    Route::get('/buildings/{id}', ShowBuildingController::class);
+    Route::get('organizations', OrganizationListController::class);
+    Route::get('organizations/{id}', OrganizationShowController::class);
 
-    // Другие эндпоинты (по аналогии):
-    // Route::get('/buildings/{id}/organizations', ByBuildingOrganizationsController::class);
-    // Route::get('/organizations/{id}', ShowOrganizationController::class);
+    // Активности
+    Route::get('activities', IndexActivityController::class);
 });
