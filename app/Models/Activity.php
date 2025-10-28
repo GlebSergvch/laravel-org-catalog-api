@@ -31,7 +31,7 @@ class Activity extends Model
 
     public function organizations(): BelongsToMany
     {
-        return $this->belongsToMany(Organization::class, 'activity_organization')
+        return $this->belongsToMany(Organization::class, 'organization_activity')
             ->withPivot('created_by', 'updated_by')
             ->withTimestamps();
     }
