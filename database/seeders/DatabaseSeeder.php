@@ -15,15 +15,31 @@ class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
-        // 1. Админ
-        $admin = User::create([
-            'name'              => 'Admin User',
-            'email'             => 'admin@example.com',
-            'email_verified_at' => now(),
-            'password'          => Hash::make('password'),
-        ]);
+        $admin = $this->seedAdmin();
 
-        // 2. 10 зданий
+        $buildingIds = $this->seedBuildings($admin->id);
+
+        $activityMap = $this->seedActivities($admin->id);
+
+        $this->seedActivityClosure($admin->id);
+
+        $this->seedOrganizations($admin->id, $buildingIds, $activityMap);
+    }
+
+    private function seedAdmin(): User
+    {
+        return User::firstOrCreate(
+            ['email' => 'admin@example.com'],
+            [
+                'name'              => 'Admin User',
+                'email_verified_at' => now(),
+                'password'          => Hash::make('password'),
+            ]
+        );
+    }
+
+    private function seedBuildings(int $adminId): array
+    {
         $buildings = [
             ['ул. Тверская, 7',          'Москва',          55.758, 37.612],
             ['пр. Невский, 85',          'Санкт-Петербург', 59.935, 30.327],
@@ -37,18 +53,25 @@ class DatabaseSeeder extends Seeder
             ['ул. Гагарина, 15',         'Воронеж',         51.660, 39.200],
         ];
 
-        $buildingIds = [];
+        $ids = [];
         foreach ($buildings as [$addr, $city, $lat, $lng]) {
-            $buildingIds[] = Building::create([
-                'address'     => $addr,
-                'city'        => $city,
-                'location'    => DB::raw("ST_GeomFromText('POINT($lng $lat)', 4326)"),
-                'created_by'  => $admin->id,
-                'updated_by'  => $admin->id,
-            ])->id;
+            $building = Building::updateOrCreate(
+                ['address' => $addr, 'city' => $city],
+                [
+                    'location'   => DB::raw("ST_GeomFromText('POINT($lng $lat)', 4326)"),
+                    'created_by' => $adminId,
+                    'updated_by' => $adminId,
+                ]
+            );
+            $ids[] = $building->id;
         }
 
-        // 3. 20 активностей
+        return $ids;
+    }
+
+    private function seedActivities(int $adminId): array
+    {
+        // [name, parentName]
         $activities = [
             ['Еда', null], ['Автомобили', null], ['Медицина', null], ['Строительство', null], ['Образование', null],
             ['Мясная продукция', 'Еда'], ['Молочная продукция', 'Еда'], ['Грузовые', 'Автомобили'], ['Легковые', 'Автомобили'],
@@ -57,39 +80,73 @@ class DatabaseSeeder extends Seeder
             ['Диагностика', 'Медицинское оборудование'], ['Лекарства', 'Фармацевтика'], ['Кирпич', 'Жилые дома'],
         ];
 
+        // Сначала создаём корневые, затем дочерние - чтобы родители уже были в карте
         $activityMap = [];
+
         foreach ($activities as [$name, $parentName]) {
             $parentId = $parentName ? ($activityMap[$parentName] ?? null) : null;
-            if ($parentId && Activity::find($parentId)->level >= 3) continue;
-            $level = $parentId ? Activity::find($parentId)->level + 1 : 1;
 
-            $activity = Activity::create([
-                'name'        => $name,
-                'parent_id'   => $parentId,
-                'level'       => $level,
-                'created_by'  => $admin->id,
-                'updated_by'  => $admin->id,
-            ]);
+            // Если родитель указан, но его ещё нет — откладываем создание и продолжим, позже второй проход возьмёт его.
+            // Для простоты — делаем find в базе для родителя, если он уже создан (на случай пересортировки)
+            if ($parentName && !$parentId) {
+                $maybeParent = Activity::where('name', $parentName)->first();
+                $parentId = $maybeParent ? $maybeParent->id : null;
+            }
+
+            $level = $parentId ? (Activity::find($parentId)->level + 1) : 1;
+
+            // Не создаём уровней глубже 3
+            if ($parentId && Activity::find($parentId)->level >= 3) {
+                continue;
+            }
+
+            $activity = Activity::updateOrCreate(
+                ['name' => $name],
+                [
+                    'parent_id'  => $parentId,
+                    'level'      => $level,
+                    'created_by' => $adminId,
+                    'updated_by' => $adminId,
+                ]
+            );
+
             $activityMap[$name] = $activity->id;
         }
 
-        // 4. Closure Table
+        return $activityMap; // name => id
+    }
+
+    private function seedActivityClosure(int $adminId): void
+    {
+        // Для каждой activity добавляем self (depth=0) и все предков (ancestor -> descendant)
+        $now = now();
         foreach (Activity::all() as $activity) {
+            // self
             DB::table('activity_closure')->updateOrInsert(
                 ['ancestor_id' => $activity->id, 'descendant_id' => $activity->id],
-                ['depth' => 0, 'created_by' => $admin->id, 'updated_by' => $admin->id, 'created_at' => now(), 'updated_at' => now()]
+                ['depth' => 0, 'created_by' => $adminId, 'updated_by' => $adminId, 'created_at' => $now, 'updated_at' => $now]
             );
 
-            $descendants = $this->getDescendants($activity->id);
-            foreach ($descendants as $desc) {
+            // поднимаемся по цепочке parent_id
+            $depth = 1;
+            $parentId = $activity->parent_id;
+            while ($parentId) {
+                $ancestor = Activity::find($parentId);
+                if (!$ancestor) break;
+
                 DB::table('activity_closure')->updateOrInsert(
-                    ['ancestor_id' => $activity->id, 'descendant_id' => $desc['id']],
-                    ['depth' => $desc['level'] - $activity->level, 'created_by' => $admin->id, 'updated_by' => $admin->id, 'created_at' => now(), 'updated_at' => now()]
+                    ['ancestor_id' => $ancestor->id, 'descendant_id' => $activity->id],
+                    ['depth' => $depth, 'created_by' => $adminId, 'updated_by' => $adminId, 'created_at' => $now, 'updated_at' => $now]
                 );
+
+                $parentId = $ancestor->parent_id;
+                $depth++;
             }
         }
+    }
 
-        // 5. 15 организаций + телефоны
+    private function seedOrganizations(int $adminId, array $buildingIds, array $activityMap): void
+    {
         $orgData = [
             ['ООО "Мясной Двор"',      '1234567891', 'Производство колбас'],
             ['ЗАО "Молочный Путь"',    '2345678901', 'Сыры и йогурты'],
@@ -113,96 +170,74 @@ class DatabaseSeeder extends Seeder
             '+7(905)555-66-77', '+7(906)666-77-88', '+7(907)777-88-99', '+7(908)888-99-00',
         ];
 
-        foreach ($orgData as $index => [$name, $inn, $desc]) {
-            $org = Organization::create([
-                'name'        => $name,
-                'inn'         => $inn,
-                'description' => $desc,
-                'created_by'  => $admin->id,
-                'updated_by'  => $admin->id,
-            ]);
+        $activityIds = array_values($activityMap);
 
-            // Здания
-            $buildingCount = rand(1, 3);
+        foreach ($orgData as [$name, $inn, $desc]) {
+            $org = Organization::updateOrCreate(
+                ['inn' => $inn],
+                [
+                    'name'        => $name,
+                    'description' => $desc,
+                    'created_by'  => $adminId,
+                    'updated_by'  => $adminId,
+                ]
+            );
+
+            // buildings: attach 1..3 первых из списка случайным образом
+            $buildingCount = rand(1, min(3, count($buildingIds)));
+            $chosenBuildingIds = collect($buildingIds)->shuffle()->take($buildingCount)->values()->all();
+
             $attachBuildings = [];
-            foreach (array_slice($buildingIds, 0, $buildingCount) as $i => $bid) {
-                $attachBuildings[$bid] = [
+            foreach ($chosenBuildingIds as $i => $bid) {
+                $attachBuildings[(int)$bid] = [
                     'is_head_office' => $i === 0,
                     'opened_at'      => now()->subMonths(rand(1, 36)),
-                    'created_by'     => $admin->id,
-                    'updated_by'     => $admin->id,
+                    'created_by'     => $adminId,
+                    'updated_by'     => $adminId,
                 ];
             }
-            $org->buildings()->attach($attachBuildings);
+            if (!empty($attachBuildings)) {
+                $org->buildings()->syncWithoutDetaching($attachBuildings);
+            }
 
-            $actCount = rand(1, 4);
-            $actIds = array_values($activityMap); // просто массив id
-            $actIdsCount = count($actIds);
+            // activities: 1..4 случайных
+            if (!empty($activityIds)) {
+                $actCount = rand(1, min(4, count($activityIds)));
+                $selectedActivityIds = collect($activityIds)->shuffle()->take($actCount)->values()->all();
 
-            $attachActivities = [];
-
-            if ($actIdsCount > 0) {
-                $countToPick = min($actCount, $actIdsCount);
-
-                if ($countToPick === 1) {
-                    $randomIndex = array_rand($actIds);
-                    $selectedIds = [$actIds[$randomIndex]];
-                } else {
-                    $randomKeys = (array) array_rand($actIds, $countToPick); // индексы
-                    $selectedIds = [];
-                    foreach ($randomKeys as $k) {
-                        $selectedIds[] = $actIds[$k];
-                    }
-                }
-
-                foreach ($selectedIds as $actId) {
+                $attachActivities = [];
+                foreach ($selectedActivityIds as $actId) {
                     $attachActivities[(int)$actId] = [
-                        'created_by' => $admin->id,
-                        'updated_by' => $admin->id,
+                        'created_by' => $adminId,
+                        'updated_by' => $adminId,
                     ];
                 }
+                if (!empty($attachActivities)) {
+                    $org->activities()->syncWithoutDetaching($attachActivities);
+                }
             }
 
-// прикрепляем (рекомендуется, чтобы не ломать при повторном сидировании)
-            if (!empty($attachActivities)) {
-                $org->activities()->syncWithoutDetaching($attachActivities);
-            }
-
-            // Телефоны
+            // phones
             $phoneCount = rand(1, 3);
             $usedPhones = [];
             for ($i = 0; $i < $phoneCount; $i++) {
+                // выбираем уникальный телефон из шаблонов
                 $phone = $phoneTemplates[array_rand($phoneTemplates)];
-                while (in_array($phone, $usedPhones)) {
+                while (in_array($phone, $usedPhones, true)) {
                     $phone = $phoneTemplates[array_rand($phoneTemplates)];
                 }
                 $usedPhones[] = $phone;
 
-                OrganizationPhone::create([
-                    'organization_id' => $org->id,
-                    'phone'           => $phone,
-                    'is_main'         => $i === 0,
-                    'type'            => $i === 0 ? 'офис' : (['склад', 'техподдержка', 'факс'][array_rand(['склад', 'техподдержка', 'факс'])]),
-                    'created_by'      => $admin->id,
-                    'updated_by'      => $admin->id,
-                ]);
+                OrganizationPhone::updateOrCreate(
+                    ['organization_id' => $org->id, 'phone' => $phone],
+                    [
+                        'is_main'    => $i === 0,
+                        'type'       => $i === 0 ? 'офис' : ['склад', 'техподдержка', 'факс'][array_rand(['склад', 'техподдержка', 'факс'])],
+                        'created_by' => $adminId,
+                        'updated_by' => $adminId,
+                    ]
+                );
             }
         }
-    }
-
-    private function getDescendants(int $id): array
-    {
-        $root = Activity::with(['children.children.children'])->find($id);
-        if (!$root) return [];
-
-        $descendants = collect();
-        $collect = function ($node) use (&$collect, &$descendants) {
-            foreach ($node->children as $child) {
-                $descendants->push(['id' => $child->id, 'level' => $child->level]);
-                $collect($child);
-            }
-        };
-        $collect($root);
-        return $descendants->toArray();
     }
 }
